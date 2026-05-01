@@ -1,0 +1,30 @@
+rules:
+  - name: uk_national_insurance
+    pattern: '[A-CEGHJ-PR-TW-Z][A-CEGHJ-NPR-TW-Z]\d{6}[A-D]'
+    action: block
+    message: "Message blocked: contains what appears to be a National Insurance number"
+
+  - name: credit_card
+    type: luhn
+    min_digits: 13
+    max_digits: 19
+    action: block
+    message: "Message blocked: contains what appears to be a credit/debit card number"
+
+  - name: uk_bank_account
+    pattern: '\d{2}-\d{2}-\d{2}\s*\d{8}'
+    action: block
+    message: "Message blocked: contains what appears to be a UK bank account number"
+
+  - name: email_address
+    pattern: '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+    action: warn
+    message: "Warning: your message contains an email address"
+
+allowed_file_types:
+  - .csv
+  - .xlsx
+  - .pdf
+  - .txt
+  - .png
+  - .jpg

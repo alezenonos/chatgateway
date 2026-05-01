@@ -1,0 +1,6 @@
+from typing import Protocol, Optional, List
+
+
+class AuthProvider(Protocol):
+    def login(self, username: str) -> Optional[str]: ...
+    def list_users(self) -> List[str]: ...
