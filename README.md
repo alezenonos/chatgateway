@@ -1,8 +1,25 @@
 # Smith+Howard Chat
 
-Enterprise AI chat gateway powered by Claude. Gives accounting, tax, and advisory teams a familiar ChatGPT-like experience with built-in content filtering for sensitive financial data.
+Enterprise AI chat gateway that gives accounting, tax, and advisory teams a familiar ChatGPT-like experience with built-in content filtering for sensitive financial data.
 
 > **Status:** Proof of Concept — designed for easy upgrade to production. See [Going to Production](#going-to-production).
+
+## Screenshots
+
+### Login Page
+> *Mock SSO login — select a user from the dropdown. In production, this redirects to Azure AD.*
+
+![Login Page](docs/screenshots/login.png)
+
+### Chat Interface
+> *Streaming responses with Smith+Howard branding. Model badge shows the active LLM.*
+
+![Chat Interface](docs/screenshots/chat.png)
+
+### Content Filter
+> *Messages containing sensitive data (NI numbers, card numbers, etc.) are blocked with a clear explanation.*
+
+![Content Filter](docs/screenshots/filter-blocked.png)
 
 ---
 
@@ -13,29 +30,40 @@ graph LR
     User[/"User (Browser)"/]
     Nginx["Nginx<br/>Reverse Proxy"]
     FastAPI["FastAPI Gateway<br/>• Auth validation<br/>• Content filtering<br/>• Stream proxy"]
-    Claude["Claude API<br/>(Anthropic)"]
+    LLM["LLM API<br/>(OpenRouter / Anthropic)"]
     IdP["Identity Provider<br/>Mock (PoC) / Azure AD (Prod)"]
 
     User -->|HTTPS| Nginx
     Nginx -->|/api/*| FastAPI
     Nginx -->|static files| User
-    FastAPI -->|streaming| Claude
+    FastAPI -->|streaming| LLM
     FastAPI -.->|validate JWT| IdP
 
     style User fill:#f5f5f5,stroke:#333,color:#333
     style Nginx fill:#2a4a7f,stroke:#1a1a1a,color:#fff
     style FastAPI fill:#1a1a1a,stroke:#c8102e,color:#fff
-    style Claude fill:#6366f1,stroke:#333,color:#fff
+    style LLM fill:#6366f1,stroke:#333,color:#fff
     style IdP fill:#444,stroke:#333,color:#fff
 ```
 
-**Three containers, no database.** The FastAPI gateway sits between the user and Claude — it validates authentication, scans messages for sensitive data, and streams responses back. Conversations live only in the browser's `sessionStorage` and are never stored server-side.
+**Three containers, no database.** The FastAPI gateway sits between the user and the LLM — it validates authentication, scans messages for sensitive data, and streams responses back. Conversations live only in the browser's `sessionStorage` and are never stored server-side.
+
+### LLM Providers
+
+The gateway supports multiple LLM backends, switched via environment variable:
+
+| Provider | Config | Default Model |
+|----------|--------|---------------|
+| **OpenRouter** (default) | `LLM_PROVIDER=openrouter` | `liquid/lfm-2.5-1.2b-instruct:free` |
+| **Anthropic** | `LLM_PROVIDER=anthropic` | `claude-sonnet-4-20250514` |
+
+OpenRouter gives access to many models (including free ones) through a single API key. See [openrouter.ai/models](https://openrouter.ai/models) for available models.
 
 ---
 
 ## Request Flow
 
-Every message goes through this pipeline before reaching Claude:
+Every message goes through this pipeline before reaching the LLM:
 
 ```mermaid
 sequenceDiagram
@@ -43,7 +71,7 @@ sequenceDiagram
     participant N as Nginx
     participant G as FastAPI Gateway
     participant F as Content Filter
-    participant C as Claude API
+    participant L as LLM API
 
     U->>N: POST /api/chat + Bearer JWT
     N->>G: Proxy request
@@ -55,9 +83,9 @@ sequenceDiagram
         G-->>U: 403 + reason
     else Clean message
         F-->>G: PASS
-        G->>C: Stream request (messages + model)
+        G->>L: Stream request (messages + model)
         loop Token by token
-            C-->>G: text chunk
+            L-->>G: text chunk
             G-->>U: SSE: data: chunk
         end
         G-->>U: SSE: data: [DONE]
@@ -130,9 +158,9 @@ graph TD
 
 ---
 
-## Content Filter
+## Content Filter & Data Handling
 
-Server-side filtering scans every message and file before it reaches Claude. Rules are configured in `config/content-filter.yaml` — no code changes needed.
+Server-side filtering scans every message and file before it reaches the LLM. Rules are configured in `config/content-filter.yaml` — no code changes needed.
 
 | What it detects | How | Action |
 |---|---|---|
@@ -143,6 +171,8 @@ Server-side filtering scans every message and file before it reaches Claude. Rul
 | Disallowed file types | Extension allowlist | **Block** upload |
 
 **File scanning** goes deeper than filenames — CSV cells and Excel cell values are extracted and scanned individually.
+
+For a comprehensive overview of how financial data is handled, current guardrails, known gaps, and production recommendations, see **[docs/data-handling.md](docs/data-handling.md)**.
 
 ### Adding a new rule
 
@@ -167,7 +197,7 @@ Restart the backend container to pick up changes.
 ### Prerequisites
 
 - Docker and Docker Compose
-- An Anthropic API key ([console.anthropic.com](https://console.anthropic.com))
+- An **OpenRouter API key** ([openrouter.ai/keys](https://openrouter.ai/keys)) — free tier available
 
 ### Setup
 
@@ -175,7 +205,7 @@ Restart the backend container to pick up changes.
 git clone https://code.roche.com/ai-uk/chatgateway.git
 cd chatgateway
 cp .env.example .env
-# Edit .env — add your ANTHROPIC_API_KEY
+# Edit .env — add your OPENROUTER_API_KEY
 docker compose up --build
 ```
 
@@ -208,7 +238,7 @@ cd backend
 python3 -m pytest tests/ -v
 ```
 
-51 tests covering: auth (unit + integration), content filter (regex, Luhn, file scanners), API routes (chat, files, health), and regression edge cases.
+56 tests covering: auth (unit + integration), content filter (regex, Luhn, file scanners), API routes (chat, files, health), proxy (provider selection), and regression edge cases. 86% code coverage.
 
 ---
 
@@ -217,9 +247,10 @@ python3 -m pytest tests/ -v
 | Endpoint | Method | Auth | Description |
 |---|---|---|---|
 | `/api/health` | GET | No | Health check — returns `{"status": "ok"}` |
+| `/api/config` | GET | No | Returns active model name and LLM provider |
 | `/api/auth/users` | GET | No | List available mock users (PoC only) |
 | `/api/auth/login` | POST | No | Mock login — returns JWT. Body: `{"username": "john.doe"}` |
-| `/api/chat` | POST | Yes | Send message to Claude (streaming SSE response). Body: `{"messages": [...]}` |
+| `/api/chat` | POST | Yes | Send message to LLM (streaming SSE response). Body: `{"messages": [...]}` |
 | `/api/files/upload` | POST | Yes | Upload file for scanning. Multipart form with `file` field |
 
 ### Chat request example
@@ -262,9 +293,9 @@ graph TB
     end
 
     subgraph "What is NOT stored"
-        NC["Conversations<br/>❌ Never on server"]
-        NF["Uploaded files<br/>❌ Never written to disk"]
-        NL["Message content logs<br/>❌ Not logged"]
+        NC["Conversations<br/>Never on server"]
+        NF["Uploaded files<br/>Never written to disk"]
+        NL["Message content logs<br/>Not logged"]
     end
 
     style BS fill:#fff3cd,stroke:#ffc107,color:#333
@@ -276,10 +307,12 @@ graph TB
 ```
 
 - **No server-side conversation storage** — sessionStorage only (cleared when tab closes)
-- **Files scanned in memory, relayed to Claude, never written to disk**
+- **Files scanned in memory, relayed to LLM, never written to disk**
 - **JWT authentication** on every API request
 - **Content filter is server-side** — cannot be bypassed from the browser
 - **CORS restricted** to the frontend origin
+
+For full details on data handling, known gaps, and production recommendations, see **[docs/data-handling.md](docs/data-handling.md)**.
 
 ---
 
@@ -329,7 +362,7 @@ graph LR
 |------|-----|-----------|---------------|
 | **Auth** | Mock user picker | Azure AD / Entra OIDC | `AUTH_PROVIDER=oidc` + OIDC env vars |
 | **TLS** | HTTP on localhost | HTTPS with real cert | Nginx ssl config + cert mount |
-| **API Key** | Dev Claude key | Production key | `ANTHROPIC_API_KEY` env var |
+| **LLM** | OpenRouter (free model) | Anthropic or OpenRouter (paid) | `LLM_PROVIDER` + API key env vars |
 | **Content filter** | Default rules | Reviewed/expanded | Edit `config/content-filter.yaml` |
 | **Domain** | localhost | chat.smithhoward.com | Nginx `server_name` + DNS |
 | **Secrets** | `.env` file | Vault / K8s secrets | Swap env var source |
@@ -341,7 +374,7 @@ graph LR
 
 ```
 chatgateway/
-├── .gitlab-ci.yml              # CI pipeline (tests, build, Docker)
+├── .gitlab-ci.yml              # CI pipeline (tests, lint, build)
 ├── docker-compose.yml          # Container orchestration
 ├── .env.example                # Environment variable template
 │
@@ -361,19 +394,19 @@ chatgateway/
 │   │   ├── luhn.py             # Luhn algorithm (card detection)
 │   │   └── scanners.py         # CSV/Excel text extraction
 │   ├── proxy/
-│   │   └── claude.py           # Claude API streaming proxy
+│   │   └── claude.py           # LLM streaming proxy (OpenRouter + Anthropic)
 │   ├── routes/
 │   │   ├── auth.py             # /api/auth/* endpoints
 │   │   ├── chat.py             # /api/chat endpoint
 │   │   ├── files.py            # /api/files/upload endpoint
-│   │   └── health.py           # /api/health endpoint
-│   └── tests/                  # 51 tests (pytest)
+│   │   └── health.py           # /api/health + /api/config endpoints
+│   └── tests/                  # 56 tests (pytest, 86% coverage)
 │
 ├── frontend/                   # React 18 / TypeScript / Vite
 │   └── src/
 │       ├── App.tsx             # Root component (login vs chat)
 │       ├── components/
-│       │   ├── Header.tsx      # S+H branded header
+│       │   ├── Header.tsx      # S+H branded header + model badge
 │       │   ├── LoginPage.tsx   # Mock login page
 │       │   ├── ChatWindow.tsx  # Message list + auto-scroll
 │       │   ├── MessageBubble.tsx # Markdown rendering
@@ -389,7 +422,8 @@ chatgateway/
 │   └── nginx.conf              # Reverse proxy configuration
 │
 └── docs/
-    └── production-guide.md     # PoC-to-production checklist
+    ├── production-guide.md     # PoC-to-production checklist
+    └── data-handling.md        # Financial data handling & security guardrails
 ```
 
 ---
@@ -400,10 +434,10 @@ GitLab CI runs on every push and merge request:
 
 | Stage | Job | What it does |
 |---|---|---|
-| **test** | `backend-unit-tests` | Runs 51 pytest tests (auth, filter, routes, regression) |
+| **test** | `backend-unit-tests` | 56 pytest tests + 86% coverage report |
 | **test** | `frontend-typecheck` | TypeScript type checking (`tsc --noEmit`) |
+| **test** | `dockerfile-lint` | Hadolint Dockerfile best-practice linting |
 | **build** | `frontend-build` | Vite production build |
-| **docker** | `docker-build` | Validates Dockerfiles build (main + MRs only) |
 
 ---
 
@@ -413,11 +447,12 @@ GitLab CI runs on every push and merge request:
 |---|---|
 | Backend | Python 3.12, FastAPI, uvicorn |
 | Frontend | React 18, TypeScript, Vite |
-| LLM | Anthropic Claude API (streaming) |
+| LLM (default) | OpenRouter API (Liquid LFM 2.5, free) |
+| LLM (alternative) | Anthropic Claude API (streaming) |
 | Auth (PoC) | PyJWT, mock IdP |
 | Auth (prod) | Azure AD OIDC |
 | Content filter | Regex, Luhn algorithm, PyYAML, openpyxl |
 | Markdown | react-markdown |
 | Reverse proxy | Nginx |
 | Containers | Docker, Docker Compose |
-| CI | GitLab CI |
+| CI | GitLab CI + Hadolint |
